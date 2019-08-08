@@ -563,28 +563,67 @@ def build_flowgraph_between(
         # Switch nodes are always marked emit_goto.
         assert not isinstance(curr_start, SwitchNode)
 
-        if isinstance(curr_start, BasicNode):
-            # In a BasicNode, the successor is the next articulation node.
-            curr_start = curr_start.successor
-        elif isinstance(curr_start, ConditionalNode):
-            # A ConditionalNode means we need to find the next articulation
-            # node. This means we need to find the "immediate postdominator"
-            # of the current node, where "postdominator" means we have to go
-            # through it, and "immediate" means we aren't skipping any.
-            curr_end = immediate_postdominator(context, curr_start, end)
-            # We also need to handle the if-else block here; this does the
-            # outputting of the subgraph between curr_start and the next
-            # articulation node.
-            body.add_if_else(
-                build_conditional_subgraph(context, curr_start, curr_end, indent)
-            )
-            # Move on.
-            curr_start = curr_end
-        else:  # ReturnNode
-            # Write the return node, and break, because there is nothing more
-            # to process.
-            write_return(context, body, curr_start, indent, last=False)
-            break
+        try:
+            if isinstance(curr_start, BasicNode):
+                # In a BasicNode, the successor is the next articulation node.
+                curr_start = curr_start.successor
+            elif isinstance(curr_start, ConditionalNode):
+                # A ConditionalNode means we need to find the next articulation
+                # node. This means we need to find the "immediate postdominator"
+                # of the current node, where "postdominator" means we have to go
+                # through it, and "immediate" means we aren't skipping any.
+                curr_end = immediate_postdominator(context, curr_start, end)
+                # We also need to handle the if-else block here; this does the
+                # outputting of the subgraph between curr_start and the next
+                # articulation node.
+                body.add_if_else(
+                    build_conditional_subgraph(context, curr_start, curr_end, indent)
+                )
+                # Move on.
+                curr_start = curr_end
+            else:  # ReturnNode
+                # Write the return node, and break, because there is nothing more
+                # to process.
+                write_return(context, body, curr_start, indent, last=False)
+                break
+        except AssertionError:
+            # If we have decided to emit a goto here, then we should just fall
+            # through to the next node, after writing a goto/conditional goto/
+            # return.
+            block_info = curr_start.block.block_info
+            assert isinstance(block_info, BlockInfo)
+            if isinstance(curr_start, BasicNode):
+                emit_goto_or_early_return(context, curr_start.successor, body, indent)
+            elif isinstance(curr_start, ConditionalNode):
+                target = curr_start.conditional_edge
+                if_body = Body(print_node_comment=False)
+                emit_goto_or_early_return(context, target, if_body, indent + 4)
+                assert block_info.branch_condition is not None
+                body.add_if_else(
+                    IfElseStatement(
+                        block_info.branch_condition,
+                        indent,
+                        if_body=if_body,
+                        else_body=None,
+                    )
+                )
+            elif isinstance(curr_start, SwitchNode):
+                assert block_info.switch_value is not None
+                emit_switch_jump(context, block_info.switch_value, body, indent)
+            else:  # ReturnNode
+                assert (
+                    curr_start.is_real()
+                ), "Fake return nodes must never be marked as emit_goto"
+                write_return(context, body, curr_start, indent, last=False)
+
+            # Advance to the next node in block order. This may skip over
+            # unreachable blocks -- hopefully none too important.
+            index = context.flow_graph.nodes.index(curr_start)
+            fallthrough = context.flow_graph.nodes[index + 1]
+            if isinstance(curr_start, ConditionalNode):
+                assert fallthrough == curr_start.fallthrough_edge
+            curr_start = fallthrough
+            continue
 
     return body
 
